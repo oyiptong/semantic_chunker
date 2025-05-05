@@ -7,6 +7,7 @@ import datetime
 import nltk
 from nltk.tokenize import sent_tokenize
 import numpy as np # Used for more robust string matching
+import uuid # Import uuid for generating a unique invocation ID
 
 # Download the NLTK punkt tokenizer data if not already present
 try:
@@ -174,7 +175,7 @@ def store_chunks_in_db(db_path: str, chunks: List[Dict[str, Any]], original_text
         conn = sqlite3.connect(db_path)
         cursor = conn.cursor()
 
-        # Create table if it doesn't exist with new columns
+        # Create table if it doesn't exist with new columns, including invocation_id
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS chunks (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -186,6 +187,7 @@ def store_chunks_in_db(db_path: str, chunks: List[Dict[str, Any]], original_text
                 char_count INTEGER,
                 sentence_count INTEGER,
                 invocation_datetime TEXT,
+                invocation_id TEXT, -- New column for invocation ID
                 source_file TEXT,
                 library_used TEXT
             )
@@ -193,6 +195,8 @@ def store_chunks_in_db(db_path: str, chunks: List[Dict[str, Any]], original_text
 
         # Get current invocation datetime in ISO 8601 format
         invocation_dt = datetime.datetime.now().isoformat()
+        # Generate a unique ID for this invocation
+        invocation_id = str(uuid.uuid4())
 
         # Use a pointer to track the current position in the original text
         current_original_offset = 0
@@ -235,9 +239,9 @@ def store_chunks_in_db(db_path: str, chunks: List[Dict[str, Any]], original_text
                 end_line, end_char = get_line_and_char_from_offset(end_index, line_offsets)
 
                 cursor.execute('''
-                    INSERT INTO chunks (chunk_text, start_line, start_char, end_line, end_char, char_count, sentence_count, invocation_datetime, source_file, library_used)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ''', (chunk_text, start_line, start_char, end_line, end_char, char_count, sentence_count, invocation_dt, source_file, library_used))
+                    INSERT INTO chunks (chunk_text, start_line, start_char, end_line, end_char, char_count, sentence_count, invocation_datetime, invocation_id, source_file, library_used)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ''', (chunk_text, start_line, start_char, end_line, end_char, char_count, sentence_count, invocation_dt, invocation_id, source_file, library_used))
             else:
                 # If sequential find fails, fall back to a global find as a last resort,
                 # but print a warning as this is less reliable for offsets.
@@ -248,9 +252,9 @@ def store_chunks_in_db(db_path: str, chunks: List[Dict[str, Any]], original_text
                      start_line, start_char = get_line_and_char_from_offset(start_index, line_offsets)
                      end_line, end_char = get_line_and_char_from_offset(end_index, line_offsets)
                      cursor.execute('''
-                        INSERT INTO chunks (chunk_text, start_line, start_char, end_line, end_char, char_count, sentence_count, invocation_datetime, source_file, library_used)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    ''', (chunk_text, start_line, start_char, end_line, end_char, char_count, sentence_count, invocation_dt, source_file, library_used))
+                        INSERT INTO chunks (chunk_text, start_line, start_char, end_line, end_char, char_count, sentence_count, invocation_datetime, invocation_id, source_file, library_used)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ''', (chunk_text, start_line, start_char, end_line, end_char, char_count, sentence_count, invocation_dt, invocation_id, source_file, library_used))
                      # Do NOT update current_original_offset here, as global find doesn't guarantee order
                      print(f"Warning: Stored chunk {i+1} using global find, offsets might be less accurate: {chunk_text[:100]}...")
                 else:
