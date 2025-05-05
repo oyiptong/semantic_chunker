@@ -1,9 +1,22 @@
 #!/usr/bin/env python3
-
 import argparse
 import sqlite3
 import os
 from typing import List, Dict, Any
+import datetime
+import nltk
+from nltk.tokenize import sent_tokenize
+
+# Download the NLTK punkt tokenizer data if not already present
+try:
+    nltk.data.find('tokenizers/punkt')
+except LookupError:
+     print("NLTK punkt tokenizer data not found. Downloading...")
+     nltk.download('punkt')
+except Exception as e:
+    # Catch any other unexpected errors during the find/download process
+    print(f"An unexpected error occurred while checking NLTK data: {e}")
+
 
 # Try importing LangChain components
 try:
@@ -13,7 +26,7 @@ try:
     LANGCHAIN_AVAILABLE = True
 except ImportError:
     LANGCHAIN_AVAILABLE = False
-    print("LangChain not found. Install with: pip install langchain langchain-experimental langchain-community sentence-transformers")
+    # print("LangChain not found. Install with: pip install langchain langchain-experimental langchain-community sentence-transformers") # Keep silent unless needed
 
 # Try importing LlamaIndex components
 try:
@@ -23,11 +36,11 @@ try:
     LLAMAINDEX_AVAILABLE = True
 except ImportError:
     LLAMAINDEX_AVAILABLE = False
-    print("LlamaIndex not found. Install with: pip install llama-index llama-index-embeddings-huggingface sentence-transformers")
+    # print("LlamaIndex not found. Install with: pip install llama-index llama-index-embeddings-huggingface sentence-transformers") # Keep silent unless needed
 
 # Ensure at least one library is available
 if not LANGCHAIN_AVAILABLE and not LLAMAINDEX_AVAILABLE:
-    raise ImportError("Neither LangChain nor LlamaIndex found. Please install at least one.")
+    raise ImportError("Neither LangChain nor LlamaIndex found. Please install at least one using the commands mentioned previously.")
 
 def get_text_with_offsets(filepath: str) -> (str, List[int]):
     """Reads a text file and returns content and start character offset for each line."""
@@ -50,13 +63,21 @@ def get_text_with_offsets(filepath: str) -> (str, List[int]):
 
 def get_line_and_char_from_offset(offset: int, line_offsets: List[int]) -> (int, int):
     """Converts a character offset to line number and character number within that line."""
+    if not line_offsets:
+        return 1, offset + 1 # Handle empty file case
+
     # Find the largest line offset less than or equal to the given offset
     line_index = 0
+    # Iterate up to the second to last element to avoid index out of bounds when checking i+1
     for i in range(len(line_offsets) - 1):
         if line_offsets[i+1] > offset:
             line_index = i
             break
-        line_index = i + 1 # In case the offset is in the last line
+    # If the loop finishes without finding a larger offset, the offset is in the last line
+    # This check is needed because the loop goes up to len(line_offsets) - 1
+    if offset >= line_offsets[-1]:
+         line_index = len(line_offsets) - 1
+
 
     line_number = line_index + 1 # Line numbers are 1-based
     char_number = offset - line_offsets[line_index] + 1 # Character numbers are 1-based
@@ -78,16 +99,10 @@ def chunk_text_langchain(text: str, embedding_model_name: str) -> List[Dict[str,
         return []
 
     # Initialize the semantic chunker
-    # We'll use a CharacterTextSplitter as the base for SemanticChunker
-    # This is a common pattern, although SemanticChunker primarily splits by sentence
-    # The underlying sentence splitting is handled internally.
     # breakpoint_threshold_amount=95 is a common starting point (split at 95th percentile of differences)
     text_splitter = SemanticChunker(embeddings, breakpoint_threshold_amount=95)
 
     # Split the text
-    # LangChain's SemanticChunker returns Documents, which include page_content (the chunk text)
-    # It doesn't directly provide start/end indices in the original text.
-    # We'll need to find the chunk text in the original text to get offsets later.
     try:
         chunks = text_splitter.create_documents([text])
         print(f"Created {len(chunks)} chunks using LangChain.")
@@ -125,7 +140,6 @@ def chunk_text_llamaindex(text: str, embedding_model_name: str) -> List[Dict[str
     document = Document(text=text)
 
     # Get nodes (chunks) from the document
-    # LlamaIndex nodes also contain the text content
     try:
         nodes = splitter.get_nodes_from_documents([document])
         print(f"Created {len(nodes)} chunks using LlamaIndex.")
@@ -135,13 +149,13 @@ def chunk_text_llamaindex(text: str, embedding_model_name: str) -> List[Dict[str
         return []
 
 def store_chunks_in_db(db_path: str, chunks: List[Dict[str, Any]], original_text: str, line_offsets: List[int], source_file: str, library_used: str):
-    """Stores chunk data in a SQLite database."""
+    """Stores chunk data in a SQLite database with additional metadata."""
     conn = None
     try:
         conn = sqlite3.connect(db_path)
         cursor = conn.cursor()
 
-        # Create table if it doesn't exist
+        # Create table if it doesn't exist with new columns
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS chunks (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -150,14 +164,32 @@ def store_chunks_in_db(db_path: str, chunks: List[Dict[str, Any]], original_text
                 start_char INTEGER,
                 end_line INTEGER,
                 end_char INTEGER,
+                char_count INTEGER,
+                sentence_count INTEGER,
+                invocation_datetime TEXT,
                 source_file TEXT,
                 library_used TEXT
             )
         ''')
 
+        # Get current invocation datetime in ISO 8601 format
+        invocation_dt = datetime.datetime.now().isoformat()
+
         # Insert chunks
         for chunk in chunks:
             chunk_text = chunk['text']
+
+            # Calculate character count
+            char_count = len(chunk_text)
+
+            # Calculate sentence count using NLTK
+            try:
+                sentences = sent_tokenize(chunk_text)
+                sentence_count = len(sentences)
+            except Exception as e:
+                print(f"Warning: Could not tokenize sentences for a chunk: {e}. Setting sentence_count to 0.")
+                sentence_count = 0
+
 
             # Find the start index of the chunk in the original text
             # Note: This is a simple approach. For complex cases (e.g., text cleaning by chunker,
@@ -171,9 +203,9 @@ def store_chunks_in_db(db_path: str, chunks: List[Dict[str, Any]], original_text
                 end_line, end_char = get_line_and_char_from_offset(end_index, line_offsets)
 
                 cursor.execute('''
-                    INSERT INTO chunks (chunk_text, start_line, start_char, end_line, end_char, source_file, library_used)
-                    VALUES (?, ?, ?, ?, ?, ?, ?)
-                ''', (chunk_text, start_line, start_char, end_line, end_char, source_file, library_used))
+                    INSERT INTO chunks (chunk_text, start_line, start_char, end_line, end_char, char_count, sentence_count, invocation_datetime, source_file, library_used)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ''', (chunk_text, start_line, start_char, end_line, end_char, char_count, sentence_count, invocation_dt, source_file, library_used))
             else:
                 print(f"Warning: Could not find chunk text in original document. Skipping chunk: {chunk_text[:100]}...") # Print first 100 chars
 
