@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-#!/usr/bin/env python3
 import argparse
 import sqlite3
 import os
@@ -8,7 +7,6 @@ import datetime
 import nltk
 from nltk.tokenize import sent_tokenize
 import numpy as np # Used for more robust string matching
-# import uuid # Import uuid for generating a unique invocation ID - No longer needed
 
 # Download the NLTK punkt tokenizer data if not already present
 try:
@@ -39,16 +37,6 @@ except Exception as e:
     print(f"An unexpected error occurred while checking for NLTK 'punkt_tab' data: {e}")
 
 
-# Try importing LangChain components
-try:
-    from langchain_text_splitters import CharacterTextSplitter
-    from langchain_experimental.text_splitter import SemanticChunker
-    from langchain_community.embeddings import SentenceTransformerEmbeddings
-    LANGCHAIN_AVAILABLE = True
-except ImportError:
-    LANGCHAIN_AVAILABLE = False
-    # print("LangChain not found. Install with: pip install langchain langchain-experimental langchain-community sentence-transformers") # Keep silent unless needed
-
 # Try importing LlamaIndex components
 try:
     from llama_index.core import Document
@@ -57,11 +45,12 @@ try:
     LLAMAINDEX_AVAILABLE = True
 except ImportError:
     LLAMAINDEX_AVAILABLE = False
-    # print("LlamaIndex not found. Install with: pip install llama-index llama-index-embeddings-huggingface sentence-transformers") # Keep silent unless needed
+    print("LlamaIndex not found. Install with: pip install llama-index llama-index-embeddings-huggingface sentence-transformers")
 
-# Ensure at least one library is available
-if not LANGCHAIN_AVAILABLE and not LLAMAINDEX_AVAILABLE:
-    raise ImportError("Neither LangChain nor LlamaIndex found. Please install at least one using the commands mentioned previously.")
+# Ensure LlamaIndex is available
+if not LLAMAINDEX_AVAILABLE:
+    raise ImportError("LlamaIndex not found. Please install it to use this script.")
+
 
 def get_text_with_offsets(filepath: str) -> (str, List[int]):
     """Reads a text file and returns content and start character offset for each line."""
@@ -104,41 +93,10 @@ def get_line_and_char_from_offset(offset: int, line_offsets: List[int]) -> (int,
     char_number = offset - line_offsets[line_index] + 1 # Character numbers are 1-based
     return line_number, char_number
 
-def chunk_text_langchain(text: str, embedding_model_name: str) -> List[Dict[str, Any]]:
-    """Chunks text using LangChain's SemanticChunker."""
-    if not LANGCHAIN_AVAILABLE:
-        print("LangChain is not installed. Cannot use LangChain chunking.")
-        return []
-
-    print(f"Using LangChain with embedding model: {embedding_model_name}")
-    # Load the embedding model
-    try:
-        embeddings = SentenceTransformerEmbeddings(model_name=embedding_model_name)
-    except Exception as e:
-        print(f"Error loading embedding model {embedding_model_name}: {e}")
-        print("Please ensure the model name is correct and sentence-transformers is installed.")
-        return []
-
-    # Initialize the semantic chunker
-    # breakpoint_threshold_amount=95 is a common starting point (split at 95th percentile of differences)
-    text_splitter = SemanticChunker(embeddings, breakpoint_threshold_amount=95)
-
-    # Split the text
-    try:
-        chunks = text_splitter.create_documents([text])
-        print(f"Created {len(chunks)} chunks using LangChain.")
-        return [{"text": chunk.page_content} for chunk in chunks]
-    except Exception as e:
-        print(f"Error during LangChain chunking: {e}")
-        return []
-
 
 def chunk_text_llamaindex(text: str, embedding_model_name: str) -> List[Dict[str, Any]]:
     """Chunks text using LlamaIndex's SemanticSplitterNodeParser."""
-    if not LLAMAINDEX_AVAILABLE:
-        print("LlamaIndex is not installed. Cannot use LlamaIndex chunking.")
-        return []
-
+    # LlamaIndex availability is checked before calling this function
     print(f"Using LlamaIndex with embedding model: {embedding_model_name}")
     # Load the embedding model
     try:
@@ -272,6 +230,7 @@ def store_chunks_in_db(db_path: str, chunks: List[Dict[str, Any]], original_text
                 else:
                     print(f"Error: Could not find chunk text in original document using sequential or global find. Skipping chunk {i+1}: {chunk_text[:100]}...") # Print first 100 chars
 
+
         conn.commit()
         print(f"Successfully stored {len(chunks)} chunks in {db_path}")
 
@@ -284,36 +243,31 @@ def store_chunks_in_db(db_path: str, chunks: List[Dict[str, Any]], original_text
             conn.close()
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Perform semantic chunking and store results in SQLite.")
+    parser = argparse.ArgumentParser(description="Perform semantic chunking using LlamaIndex and store results in SQLite.")
     parser.add_argument("input_file", help="Path to the input text file.")
-    parser.add_argument("library", choices=["langchain", "llamaindex"], help="Library to use for chunking (langchain or llamaindex).")
     parser.add_argument("--db_path", default="chunks.db", help="Path to the SQLite database file.")
     parser.add_argument("--embedding_model", default="all-MiniLM-L6-v2", help="Name of the Sentence-Transformers embedding model to use.")
 
     args = parser.parse_args()
 
-    # Check if the selected library is available
-    if args.library == "langchain" and not LANGCHAIN_AVAILABLE:
-        print("LangChain is not installed. Please install it to use this option.")
-        exit(1)
-    if args.library == "llamaindex" and not LLAMAINDEX_AVAILABLE:
-        print("LlamaIndex is not installed. Please install it to use this option.")
+    # Check if LlamaIndex is available
+    if not LLAMAINDEX_AVAILABLE:
+        print("LlamaIndex is not installed. Please install it to use this script.")
         exit(1)
 
     # Read the input file and get line offsets
     original_text, line_offsets = get_text_with_offsets(args.input_file)
 
-    # Perform chunking
-    if args.library == "langchain":
-        chunks_data = chunk_text_langchain(original_text, args.embedding_model)
-    elif args.library == "llamaindex":
-        chunks_data = chunk_text_llamaindex(original_text, args.embedding_model)
-    else:
-        chunks_data = [] # Should not happen due to argparse choices
+    # Hardcode library to llamaindex
+    library_used = "llamaindex"
+
+    # Perform chunking using LlamaIndex
+    chunks_data = chunk_text_llamaindex(original_text, args.embedding_model)
+
 
     if not chunks_data:
         print("No chunks were generated. Exiting.")
         exit(1)
 
     # Store chunks in the database
-    store_chunks_in_db(args.db_path, chunks_data, original_text, line_offsets, args.input_file, args.library)
+    store_chunks_in_db(args.db_path, chunks_data, original_text, line_offsets, args.input_file, library_used)
