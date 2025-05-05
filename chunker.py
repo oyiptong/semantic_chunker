@@ -6,16 +6,35 @@ from typing import List, Dict, Any
 import datetime
 import nltk
 from nltk.tokenize import sent_tokenize
+import numpy as np # Used for more robust string matching
 
 # Download the NLTK punkt tokenizer data if not already present
 try:
     nltk.data.find('tokenizers/punkt')
 except LookupError:
-     print("NLTK punkt tokenizer data not found. Downloading...")
+     print("NLTK punkt tokenizer data not found. Downloading 'punkt'...")
      nltk.download('punkt')
 except Exception as e:
-    # Catch any other unexpected errors during the find/download process
-    print(f"An unexpected error occurred while checking NLTK data: {e}")
+    # Catch any other unexpected errors during the find process for 'punkt'
+    print(f"An unexpected error occurred while checking for NLTK 'punkt' data: {e}")
+
+# Also check for 'punkt_tab' which might be needed by sent_tokenize in some cases
+try:
+    nltk.data.find('tokenizers/punkt_tab')
+except LookupError:
+     print("NLTK punkt_tab tokenizer data not found. Downloading 'punkt_tab'...")
+     # Note: Sometimes downloading 'punkt' includes 'punkt_tab', but explicitly
+     # downloading 'punkt_tab' can help if it's missing.
+     # If this still fails, you might need to run nltk.download() interactively
+     # and select 'punkt' or 'all' to ensure all dependencies are met.
+     try:
+         nltk.download('punkt_tab')
+     except Exception as e:
+         print(f"Could not automatically download 'punkt_tab'. Please try running 'import nltk; nltk.download(\\'punkt_tab\\')' manually.")
+         print(f"Error: {e}")
+except Exception as e:
+    # Catch any other unexpected errors during the find process for 'punkt_tab'
+    print(f"An unexpected error occurred while checking for NLTK 'punkt_tab' data: {e}")
 
 
 # Try importing LangChain components
@@ -175,8 +194,11 @@ def store_chunks_in_db(db_path: str, chunks: List[Dict[str, Any]], original_text
         # Get current invocation datetime in ISO 8601 format
         invocation_dt = datetime.datetime.now().isoformat()
 
+        # Use a pointer to track the current position in the original text
+        current_original_offset = 0
+
         # Insert chunks
-        for chunk in chunks:
+        for i, chunk in enumerate(chunks):
             chunk_text = chunk['text']
 
             # Calculate character count
@@ -187,17 +209,27 @@ def store_chunks_in_db(db_path: str, chunks: List[Dict[str, Any]], original_text
                 sentences = sent_tokenize(chunk_text)
                 sentence_count = len(sentences)
             except Exception as e:
-                print(f"Warning: Could not tokenize sentences for a chunk: {e}. Setting sentence_count to 0.")
+                print(f"Warning: Could not tokenize sentences for chunk {i+1}: {e}. Setting sentence_count to 0.")
                 sentence_count = 0
 
+            # --- More Robust Chunk Matching ---
+            # Try to find the chunk text starting from the current_original_offset
+            # This assumes chunks are returned in order and is more reliable than global find.
+            # We also strip leading/trailing whitespace for a more flexible match.
+            search_text = original_text[current_original_offset:]
+            chunk_text_stripped = chunk_text.strip()
 
-            # Find the start index of the chunk in the original text
-            # Note: This is a simple approach. For complex cases (e.g., text cleaning by chunker,
-            # very short or identical chunks), a more robust matching might be needed.
-            start_index = original_text.find(chunk_text)
+            # Find the start index of the stripped chunk text in the remaining original text
+            relative_start_index = search_text.find(chunk_text_stripped)
 
-            if start_index != -1:
-                end_index = start_index + len(chunk_text) - 1 # End index is inclusive
+            if relative_start_index != -1:
+                # Calculate the absolute start index in the original text
+                start_index = current_original_offset + relative_start_index
+                # Calculate the end index based on the original chunk text length
+                end_index = start_index + len(chunk_text) - 1
+
+                # Update the current_original_offset for the next chunk search
+                current_original_offset = end_index + 1 # Start searching after the current chunk
 
                 start_line, start_char = get_line_and_char_from_offset(start_index, line_offsets)
                 end_line, end_char = get_line_and_char_from_offset(end_index, line_offsets)
@@ -207,7 +239,22 @@ def store_chunks_in_db(db_path: str, chunks: List[Dict[str, Any]], original_text
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ''', (chunk_text, start_line, start_char, end_line, end_char, char_count, sentence_count, invocation_dt, source_file, library_used))
             else:
-                print(f"Warning: Could not find chunk text in original document. Skipping chunk: {chunk_text[:100]}...") # Print first 100 chars
+                # If sequential find fails, fall back to a global find as a last resort,
+                # but print a warning as this is less reliable for offsets.
+                print(f"Warning: Sequential find failed for chunk {i+1}. Falling back to global find.")
+                start_index = original_text.find(chunk_text)
+                if start_index != -1:
+                     end_index = start_index + len(chunk_text) - 1
+                     start_line, start_char = get_line_and_char_from_offset(start_index, line_offsets)
+                     end_line, end_char = get_line_and_char_from_offset(end_index, line_offsets)
+                     cursor.execute('''
+                        INSERT INTO chunks (chunk_text, start_line, start_char, end_line, end_char, char_count, sentence_count, invocation_datetime, source_file, library_used)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ''', (chunk_text, start_line, start_char, end_line, end_char, char_count, sentence_count, invocation_dt, source_file, library_used))
+                     # Do NOT update current_original_offset here, as global find doesn't guarantee order
+                     print(f"Warning: Stored chunk {i+1} using global find, offsets might be less accurate: {chunk_text[:100]}...")
+                else:
+                    print(f"Error: Could not find chunk text in original document using sequential or global find. Skipping chunk {i+1}: {chunk_text[:100]}...") # Print first 100 chars
 
         conn.commit()
         print(f"Successfully stored {len(chunks)} chunks in {db_path}")
